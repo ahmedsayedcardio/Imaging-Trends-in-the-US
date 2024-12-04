@@ -1,0 +1,390 @@
+---
+title: "Multimodality Imagers in the US, 2013-2022"
+subtitle: "An Analysis of Medicare Data"
+format: 
+  html:
+    toc: true
+    toc-expand: true
+    toc-location: body
+date: 2-5-2024
+theme: lightly
+author:
+  - name: "Ahmed Sayed (asu.ahmed.sayed@gmail.com)"
+    affiliations: "Houston Methodist DeBakey Heart & Vascular Center, Houston, Texas, USA"
+    address: 6550 Fannin Street
+    city: Houston
+    state: Texas
+    postal: 77030
+embed-resources: true
+toc-title: Contents
+page-layout: full
+code-fold: true
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Libraries
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(data.table)
+library(ggplot2)
+library(forcats)
+library(ggthemes)
+library(scales)
+library(ggpubr)
+library(readr)
+library(curl)
+library(stringr)
+library(usmap)
+library(dtplyr)
+library(facetscales)
+library(Hmisc)
+```
+
+## Combine & clean data
+
+### Total
+
+```{r}
+#Combine the data
+total_data <- list.files(path = "Total Data/", full.names = TRUE) %>%
+  lapply(., function(filename) fread(filename) %>%
+           mutate(year = str_extract(filename, "[0-9]+"))) %>%
+  rbindlist
+#Filter to National Data
+total_data <- total_data[Rndrng_Prvdr_Geo_Lvl == "National"]
+
+#Clean up the data
+total_data <- total_data %>%
+  #Rename
+  rename(n_services = Tot_Srvcs,
+         code = HCPCS_Cd
+         ) %>%
+  #Change formating
+  mutate(year = year %>% as.numeric,
+         code = code %>% as.factor
+         ) %>%
+  #Select relevant columns
+    select(code, n_services, year)
+
+#Modality HSPCS codes
+pet_codes <- paste0(c(78429:78433, 78459, 78491, 78492))
+spect_codes <- paste0(c(78451, 78452))
+ct_codes <- paste0(c(75571:75574))
+mri_codes <- paste0(c(75557, 75559, 75561, 75563))
+echo_codes <- paste0(c(93303, 93304,
+                       93306, 93307, 93308,
+                       93312:93318,
+                       93350:93351))
+
+#Tabulate
+data.frame(
+  Modality = c("SPECT", "Echo", "CT", "PET", "MRI"),
+  Codes = c(spect_codes %>% paste0(collapse = ", "),
+            echo_codes %>% paste0(collapse = ", "),
+            ct_codes %>% paste0(collapse = ", "),
+            pet_codes %>% paste0(collapse = ", "),
+            mri_codes %>% paste0(collapse = ", "))
+) -> codes_used
+
+#Create a table containing the used codes
+library(flextable)
+flextable(codes_used) %>%
+  bold(part = "header") %>%
+  bold(j = 1) %>%
+  border_inner %>%
+  border_outer %>%
+  font(fontname = "Times New Roman") %>%
+  width(width = 2.5) -> codes_used_table
+  
+
+#Whatever's not included in the above, filter it out
+total_data <- total_data %>%
+  filter(code %in% c(pet_codes, spect_codes,
+                     ct_codes, mri_codes,
+                     echo_codes))
+
+#Rename codes to meaningful things
+total_data <- total_data %>%
+  mutate(modality = case_when(
+    code %in% pet_codes ~ "PET",
+    code %in% spect_codes ~ "SPECT",
+    code %in% ct_codes ~ "CT",
+    code %in% mri_codes ~ "MRI",
+    code %in% echo_codes ~ "Echo"
+  ) %>% factor)
+```
+
+### PROVIDER-level
+
+```{r}
+#Combine the data
+data <- list.files(path = "Data/", full.names = TRUE) %>%
+  lapply(., function(filename) fread(filename) %>%
+           mutate(year = str_extract(filename, "[0-9]+"))) %>%
+  rbindlist
+
+#Clean up the data
+data <- data %>%
+  #Rename
+  rename(npi = Rndrng_NPI,
+         n_services = Tot_Srvcs,
+         provider_type = Rndrng_Prvdr_Type,
+         code = HCPCS_Cd,
+         credentials = Rndrng_Prvdr_Crdntls,
+         gender = Rndrng_Prvdr_Gndr
+         ) %>%
+  #Change formating
+  mutate(year = year %>% as.numeric,
+         code = code %>% as.factor,
+         provider_type = provider_type %>% as.factor
+         ) %>%
+  #Select relevant columns
+    select(npi, provider_type, credentials, code, n_services, year, gender)
+
+
+#Whatever's not included in the above, filter it out
+data <- data %>%
+  filter(code %in% c(pet_codes, spect_codes,
+                     ct_codes, mri_codes,
+                     echo_codes))
+
+#Rename codes to meaningful things
+data <- data %>%
+  mutate(modality = case_when(
+    code %in% pet_codes ~ "PET",
+    code %in% spect_codes ~ "SPECT",
+    code %in% ct_codes ~ "CT",
+    code %in% mri_codes ~ "MRI",
+    code %in% echo_codes ~ "Echo"
+  ) %>% factor)
+
+#Categorize relevant stuff into cardio and radio
+data <- data %>%
+  #Correct spelling mistake ("cardiatric")
+  mutate(provider_type = provider_type %>% str_replace_all("(?i)cardiatric", "cardiac")) %>%
+  mutate(cards_rads = case_when(
+    provider_type %>% str_detect("(?i)Heart|Cardio|Cardiac electro|Interventional Cardiology") ~ "Cardiology",
+    provider_type %>% str_detect("(?i)Radio|Nuclear") ~ "Radiology",
+    TRUE ~ "Other"
+  ) %>% factor
+  )
+```
+
+## Import \# Medicare
+
+```{r}
+medicare_n <- fread("Medicare Enrollment.csv") %>%
+  filter(BENE_GEO_LVL == "National" & MONTH == "Year") %>%
+  select(YEAR, B_ORGNL_MDCR_BENES) %>%
+  rename(year = YEAR,
+         n_part_b = B_ORGNL_MDCR_BENES) %>%
+  mutate(n_part_b = as.numeric(n_part_b))
+
+```
+
+## Create reader-by-modality dataset
+
+```{r}
+#This new dataset contains the modalities read by each reader over time, with a separate row for each modality/reader
+readers_by_modality <- data %>%
+  lazy_dt %>%
+  group_by(year, modality) %>%
+  summarise(n_readers = uniqueN(npi)
+  ) 
+```
+
+# Analyze
+
+## Procedures over time
+
+### Create data
+
+```{r}
+# Services over time
+n_services <- total_data %>%
+  group_by(year, modality) %>%
+  summarise(n = sum(n_services))
+
+#Order them
+n_services <- n_services %>%
+  mutate(modality = modality %>% fct_relevel("Echo", "SPECT", "CT", "PET", "MRI"),
+         n = as.integer(n)
+         ) %>%
+  mutate(prop = 100*n/sum(n)) %>%
+  left_join(., medicare_n, by = "year") %>%
+  data.table
+
+#Add a baseline
+left_join(n_services, 
+          n_services %>% 
+            filter(year == 2013) %>%
+            mutate(baseline_rate = n/n_part_b) %>%
+            select(modality, baseline_rate),
+          by = "modality"
+          ) -> n_services
+
+#Calculate the current rate (per beneficiary)
+n_services[, rate := n/n_part_b]
+#Calculate the ratio of subsequent to baseline
+n_services[, ratio := rate/baseline_rate]
+
+
+#Total services over time
+n_services_total <- total_data %>% 
+  group_by(year) %>%
+  summarise(n = sum(n_services)) %>%
+  left_join(., medicare_n, by = "year") %>%
+  data.table 
+#Calculate the baseline rate (per beneficiacy)
+n_services_total[, baseline_rate := n_services_total[year == 2013, n/n_part_b]]
+#Calculate the current rate (per beneficiary)
+n_services_total[, rate := n/n_part_b]
+#Calculate the ratio of subsequent to baseline
+n_services_total[, ratio := rate/baseline_rate]
+n_services_total[, modality := "Total"]
+```
+
+### Figure 1A
+
+```{r}
+ggplot(data = n_services,
+       aes(y = n,
+           x = year,
+           color = modality)) +
+  geom_line(lwd = 2) +
+  geom_point(size = 9, pch = 18) +
+  ggtitle("Trends in the use of cardiac imaging modalities among Medicare Part B beneficiaries, 2013-2022") +
+  scale_y_continuous(name = "Number of procedures",
+                     trans = "log",
+                     breaks = c(10000, 25000, 50000,  
+                                100000, 250000, 500000,
+                                1000000, 2500000, 5000000, 7500000),
+                     labels = function(x) comma(x)) +
+  scale_x_continuous(name = NULL,
+                     breaks = seq(2013, 2022, 1)) +
+    scale_color_stata(name = "Modality") +
+  #Theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+      plot.title=element_text(face = "bold",hjust = 0.5, size = 18),
+      plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+      axis.text.x = element_text(size = 16, face = "bold"),
+      axis.text.y = element_text(size = 15, face = "bold"),
+      axis.title.x = element_text(size = 25, face = "bold"),
+      axis.title.y = element_text(size = 18, face = "bold"),
+      axis.line = element_line(colour = "black", linewidth = 1.2),
+      plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+      strip.text = element_text(face = "bold"),
+      strip.background = element_rect(fill = "grey90"),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 16, face = "bold"),
+      legend.key.width = unit(4, "cm"),
+      legend.key.height = unit(0.75, "cm"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.key = element_rect(fill = "transparent"),
+      panel.spacing = unit(1, "lines")
+      ) -> modalities_change_fig
+
+ggsave("PDF Figures/Figure 1A.pdf",
+       dpi = 600,
+       width = 16,
+       height = 9)
+```
+
+### Figure 1B (% change)
+
+```{r}
+ggplot(data = n_services,
+       aes(y = ratio,
+           x = year,
+           color = modality)) +
+  geom_hline(yintercept = 1, lwd = 1.25) +
+  geom_line(lwd = 2) +
+  geom_point(size = 9, pch = 18) +
+  ggtitle("Percent change in the use of cardiac imaging modalities among Medicare Part B beneficiaries, 2013-2022") +
+  scale_y_continuous(name = "% Change in the N of procedures per beneficiary since 2013",
+                     trans = "log",
+                     breaks = c(0.75, 1, 1.5, 2, 3, 4),
+                     labels = c("25%\ndecrease", "No change",
+                                "50%\nincrease",
+                                "100%\nincrease", 
+                                "200%\nincrease", 
+                                "300%\nincrease")
+                     ) +
+  scale_x_continuous(name = NULL,
+                     breaks = seq(2013, 2022, 1)) +
+    scale_color_stata(name = "Modality") +
+  #Theme
+  theme_pubclean() +
+  theme(text = element_text(size = 23),
+      plot.title=element_text(face = "bold",hjust = 0.5, size = 18),
+      plot.subtitle = element_text(face = "bold", size = 10, hjust = 0.0, color = "grey45"),
+      axis.text.x = element_text(size = 16, face = "bold"),
+      axis.text.y = element_text(size = 15, face = "bold"),
+      axis.title.x = element_text(size = 25, face = "bold"),
+      axis.title.y = element_text(size = 18, face = "bold"),
+      axis.line = element_line(colour = "black", linewidth = 1.2),
+      plot.margin = margin(0.5, 1, 0.5, 1, "cm"),
+      strip.text = element_text(face = "bold"),
+      strip.background = element_rect(fill = "grey90"),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 16, face = "bold"),
+      legend.key.width = unit(4, "cm"),
+      legend.key.height = unit(0.75, "cm"),
+      legend.background = element_rect(fill = "transparent"),
+      legend.key = element_rect(fill = "transparent"),
+      panel.spacing = unit(1, "lines")
+      ) -> modalities_change_fig
+
+ggsave("PDF Figures/Figure 1B.pdf",
+       dpi = 600,
+       width = 16,
+       height = 9)
+```
+
+## Values
+
+### Procedures
+
+```{r}
+#N of total services
+n_services_total$n %>% signif(2)
+(n_services_total$rate*1000)
+#
+n_services[year %in% c(2013, 2022)] %>% 
+  arrange(modality) %>%
+  mutate(rate = (rate * 100) %>% round(2) )
+
+```
+
+### Specialties
+
+```{r}
+#Create any modality by cardio/modality
+data[, .(n = sum(n_services)),
+           by = .(year, cards_rads)][, .(n, 
+                                        prop = (100*n/sum(n)) %>% round(1),
+                                        cards_rads
+                                        ),
+                                    by = year][year %in% c(2013, 2022)]
+
+#Excluding echo
+data[modality %nin% c("Echo", "SPECT"), 
+     .(n = sum(n_services)),
+           by = .(year, cards_rads)][, .(n, 
+                                        prop = (100*n/sum(n)) %>% round(1),
+                                        cards_rads
+                                        ),
+                                    by = year][year %in% c(2013, 2022)]
+#Readers by modality
+readers_by_modality
+
+```
+
+## 
